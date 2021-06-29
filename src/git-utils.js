@@ -323,7 +323,7 @@ class GitUtils {
  */
 async function getRootGitDir(gitpath) {
   if (!await fse.pathExists(gitpath)) {
-    throw Error('Directory does not exist');
+    throw Error('Expected a local git repository.');
   }
 
   const stat = await fse.lstat(gitpath);

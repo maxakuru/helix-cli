@@ -82,7 +82,7 @@ describe('Integration test for up command', function suite() {
         .run();
       assert.fail('hlx up without .git should fail.');
     } catch (e) {
-      assert.equal(e.message, 'hlx up needs local git repository.');
+      assert.strictEqual(e.message, 'Expected a local git repository.');
     }
   });
 
