@@ -23,13 +23,13 @@ const pkgJson = require('../package.json');
 
 const HELIX_CONFIG = 'helix-config.yaml';
 const HELIX_QUERY = 'helix-query.yaml';
-const GIT_HEAD = '.git/HEAD';
 
 class UpCommand extends BuildCommand {
   constructor(logger) {
     super(logger);
     this._httpPort = -1;
     this._open = false;
+    this._gitHead = null;
     this._liveReload = false;
     this._saveConfig = false;
     this._overrideHost = null;
@@ -154,7 +154,7 @@ class UpCommand extends BuildCommand {
 
     this._watcher = chokidar.watch([
       'src', 'cgi-bin', '.hlx/pages/master/src', '.hlx/pages/master/cgi-bin',
-      HELIX_CONFIG, HELIX_QUERY, GIT_HEAD,
+      HELIX_CONFIG, HELIX_QUERY, this._gitHead,
     ], {
       ignored: /(.*\.swx|.*\.swp|.*~)/,
       persistent: true,
@@ -179,10 +179,11 @@ class UpCommand extends BuildCommand {
 
   async setup() {
     await super.init();
-    // check for git repository
-    if (!await fse.pathExists(path.join(this.directory, '.git'))) {
-      throw Error('hlx up needs local git repository.');
+    if (!this._gitHead) {
+      this._gitDir = await GitUtils.getGitDir(this.directory);
+      this._gitHead = path.join(this._gitDir, 'HEAD');
     }
+
     // init dev default file params
     this._devDefault = Object.assign(this._devDefaultFile(this.directory), this._devDefault);
 
@@ -212,6 +213,7 @@ class UpCommand extends BuildCommand {
         throw Error(`Specified --local-repo=${repo} is not a git repository.`);
       }
       const gitUrl = await GitUtils.getOriginURL(repoPath);
+
       if (!gitUrl) {
         if (repoPath !== this.directory) {
           this.log.warn(`Ignoring --local-repo=${repo}. No remote 'origin' defined.`);
@@ -258,7 +260,7 @@ class UpCommand extends BuildCommand {
 
       if (!this._pagesProxy) {
         // local branch should be considered as default for pages project
-        const ref = await GitUtils.getBranch(this.directory);
+        const ref = await GitUtils.getBranch(this.directory, this._gitDir);
         const defaultStrain = this.config.strains.get('default');
         defaultStrain.content = new GitUrl({
           ...defaultStrain.content.toJSON(),
@@ -276,8 +278,8 @@ class UpCommand extends BuildCommand {
       } else {
         if (!this._pagesUrl) {
           // get proxy url
-          const gitUrl = await GitUtils.getOriginURL(this.directory);
-          const ref = await GitUtils.getBranch(this.directory);
+          const gitUrl = await GitUtils.getOriginURL(this.directory, this._gitDir);
+          const ref = await GitUtils.getBranch(this.directory, this._gitDir);
           this._pagesUrl = `https://${ref}--${gitUrl.repo}--${gitUrl.owner}.hlx.page`;
         }
         this._project
@@ -355,7 +357,7 @@ class UpCommand extends BuildCommand {
         // init source watcher after everything is built
         this._initSourceWatcher(async (files) => {
           const dirtyConfigFiles = Object.keys(files || {})
-            .filter((f) => f === HELIX_CONFIG || f === HELIX_QUERY || f === GIT_HEAD);
+            .filter((f) => f === HELIX_CONFIG || f === HELIX_QUERY || f === this._gitHead);
           if (dirtyConfigFiles.length) {
             this.log.info(`${dirtyConfigFiles.join(', ')} modified. Restarting dev server...`);
             await this._project.stop();

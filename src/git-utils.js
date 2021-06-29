@@ -13,6 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const readline = require('readline');
 
 const ignore = require('ignore');
 const ini = require('ini');
@@ -30,14 +31,17 @@ class GitUtils {
    *
    * @param {string} dir working tree directory path of the git repo
    * @param {string} [homedir] optional users home directory
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<boolean>} `true` if there are uncommitted/unstaged changes; otherwise `false`
    */
-  static async isDirty(dir, homedir = os.homedir()) {
+  static async isDirty(dir, homedir = os.homedir(), gitdir) {
     // see https://isomorphic-git.org/docs/en/statusMatrix
     const HEAD = 1;
     const WORKDIR = 2;
     const STAGE = 3;
-    const matrix = await git.statusMatrix({ fs, dir, cache });
+    const matrix = await git.statusMatrix({
+      fs, dir, cache, gitdir,
+    });
     let modified = matrix
       .filter((row) => !(row[HEAD] === row[WORKDIR] && row[WORKDIR] === row[STAGE]));
     if (modified.length === 0) {
@@ -105,9 +109,10 @@ class GitUtils {
    * @param {string} dir working tree directory path of the git repo
    * @param {string} filepath file to check
    * @param {string} [homedir] optional users home directory
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<boolean>} `true` if the file is ignored.
    */
-  static async isIgnored(dir, filepath, homedir = os.homedir()) {
+  static async isIgnored(dir, filepath, homedir = os.homedir(), gitdir) {
     if (!(await fse.pathExists(path.resolve(dir, filepath)))) {
       return true;
     }
@@ -116,7 +121,7 @@ class GitUtils {
     }
 
     const status = await git.status({
-      fs, dir, filepath, cache,
+      fs, dir, filepath, cache, gitdir,
     });
     if (status === 'ignored') {
       return true;
@@ -140,25 +145,35 @@ class GitUtils {
    * will be returned instead.
    *
    * @param {string} dir working tree directory path of the git repo
+   * @param {string} [gitdir] the git directory path
+   *
    * @returns {Promise<string>} current branch or tag
    */
-  static async getBranch(dir) {
+  static async getBranch(dir, gitdir) {
     // current branch name
-    const currentBranch = await git.currentBranch({ fs, dir, fullname: false });
+    const currentBranch = await git.currentBranch({
+      fs, dir, fullname: false, gitdir,
+    });
     // current commit sha
-    const rev = await git.resolveRef({ fs, dir, ref: 'HEAD' });
+    const rev = await git.resolveRef({
+      fs, dir, ref: 'HEAD', gitdir,
+    });
     // reverse-lookup tag from commit sha
-    const allTags = await git.listTags({ fs, dir });
+    const allTags = await git.listTags({ fs, dir, gitdir });
 
     // iterate sequentially over tags to avoid OOME
     for (const tag of allTags) {
       /* eslint-disable no-await-in-loop */
-      const oid = await git.resolveRef({ fs, dir, ref: tag });
+      const oid = await git.resolveRef({
+        fs, dir, ref: tag, gitdir,
+      });
       const obj = await git.readObject({
         fs, dir, oid, cache,
       });
       const commitSha = obj.type === 'tag'
-        ? await git.resolveRef({ fs, dir, ref: obj.object.object }) // annotated tag
+        ? await git.resolveRef({
+          fs, dir, ref: obj.object.object, gitdir,
+        }) // annotated tag
         : oid; // lightweight tag
       if (commitSha === rev) {
         return tag;
@@ -174,11 +189,12 @@ class GitUtils {
    * current branch or tag.
    *
    * @param {string} dir working tree directory path of the git repo
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<string>} `dirty` or encoded current branch/tag
   */
-  static async getBranchFlag(dir) {
-    const dirty = await GitUtils.isDirty(dir);
-    const branch = await GitUtils.getBranch(dir);
+  static async getBranchFlag(dir, gitdir) {
+    const dirty = await GitUtils.isDirty(dir, undefined, gitdir);
+    const branch = await GitUtils.getBranch(dir, gitdir);
     return dirty ? 'dirty' : branch.replace(/[\W]/g, '-');
   }
 
@@ -188,10 +204,11 @@ class GitUtils {
    * will be returned instead.
    *
    * @param {string} dir working tree directory path of the git repo
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<string>} `dirty` or encoded current branch/tag
    */
-  static async getRepository(dir) {
-    const repo = (await GitUtils.getOrigin(dir))
+  static async getRepository(dir, gitdir) {
+    const repo = (await GitUtils.getOrigin(dir, gitdir))
       .replace(/[\W]/g, '-');
     return repo !== '' ? repo : `local--${path.basename(dir)}`;
   }
@@ -200,11 +217,12 @@ class GitUtils {
    * Returns the `origin` remote url or `''` if none is defined.
    *
    * @param {string} dir working tree directory path of the git repo
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<string>} `origin` remote url
    */
-  static async getOrigin(dir) {
+  static async getOrigin(dir, gitdir) {
     try {
-      const rmt = (await git.listRemotes({ fs, dir })).find((entry) => entry.remote === 'origin');
+      const rmt = (await git.listRemotes({ fs, dir, gitdir })).find((entry) => entry.remote === 'origin');
       return typeof rmt === 'object' ? rmt.url : '';
     } catch (e) {
       // don't fail if directory is not a git repository
@@ -216,10 +234,11 @@ class GitUtils {
    * Same as #getOrigin() but returns a `GitUrl` instance instead of a string.
    *
    * @param {string} dir working tree directory path of the git repo
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<GitUrl>} `origin` remote url ot {@code null} if not available
    */
-  static async getOriginURL(dir) {
-    const origin = await GitUtils.getOrigin(dir);
+  static async getOriginURL(dir, gitdir) {
+    const origin = await GitUtils.getOrigin(dir, gitdir);
     return origin ? new GitUrl(origin) : null;
   }
 
@@ -227,10 +246,13 @@ class GitUtils {
    * Returns the sha of the current (i.e. `HEAD`) commit.
    *
    * @param {string} dir working tree directory path of the git repo
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<string>} sha of the current (i.e. `HEAD`) commit
    */
-  static async getCurrentRevision(dir) {
-    return git.resolveRef({ fs, dir, ref: 'HEAD' });
+  static async getCurrentRevision(dir, gitdir) {
+    return git.resolveRef({
+      fs, dir, ref: 'HEAD', gitdir,
+    });
   }
 
   /**
@@ -238,19 +260,24 @@ class GitUtils {
    *
    * @param {string} dir git repo path
    * @param {string} ref reference (branch, tag or commit sha)
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<string>} commit oid of the curent commit referenced by `ref`
    * @throws {Errors.NotFoundError}: resource not found
    */
-  static async resolveCommit(dir, ref) {
-    return git.resolveRef({ fs, dir, ref })
+  static async resolveCommit(dir, ref, gitdir) {
+    return git.resolveRef({
+      fs, dir, ref, gitdir,
+    })
       .catch(async (err) => {
         if (err instanceof git.Errors.NotFoundError) {
           // fallback: is ref a shortened oid prefix?
           const oid = await git.expandOid({
-            fs, dir, oid: ref, cache,
+            fs, dir, oid: ref, cache, gitdir,
           })
             .catch(() => { throw err; });
-          return git.resolveRef({ fs, dir, ref: oid });
+          return git.resolveRef({
+            fs, dir, ref: oid, gitdir,
+          });
         }
         // re-throw
         throw err;
@@ -263,16 +290,74 @@ class GitUtils {
    * @param {string} dir git repo path
    * @param {string} ref reference (branch, tag or commit sha)
    * @param {string} filePath relative path to file
+   * @param {string} [gitdir] the git directory path
    * @returns {Promise<Buffer>} content of specified file
    * @throws {Errors.NotFoundError}: resource not found or invalid reference
    */
-  static async getRawContent(dir, ref, pathName) {
+  static async getRawContent(dir, ref, pathName, gitdir) {
     return GitUtils.resolveCommit(dir, ref)
       .then((oid) => git.readObject({
-        fs, dir, oid, filepath: pathName, format: 'content', cache,
+        fs, dir, oid, filepath: pathName, format: 'content', cache, gitdir,
       }))
       .then((obj) => obj.object);
   }
+
+  /**
+   * Returns the root git directory for a given repository directory path.
+   * If the path is a submodule, it recurses to find the root git dir.
+   *
+   * @param {string} dir git repo path
+   * @returns {Promise<string>} git directory for repository
+   * @throws {string}: dir is not a directory, not a repo, or invalid submodule
+   */
+  static async getGitDir(dir) {
+    // eslint-disable-next-line no-use-before-define
+    return getRootGitDir(path.join(dir, '.git'));
+  }
+}
+
+/**
+ * Get root git directory given path to a .git directory or file
+ * @param {string} gitpath git path, may be file or directory
+ * @returns {string} path to git directory
+ */
+async function getRootGitDir(gitpath) {
+  if (!await fse.pathExists(gitpath)) {
+    throw Error('Directory does not exist');
+  }
+
+  const stat = await fse.lstat(gitpath);
+  if (stat.isDirectory()) {
+    // If it's a directory, assume it's a git directory
+    return gitpath;
+  }
+
+  // If it's a file, maybe it's a submodule
+  if (stat.isFile()) {
+    const fileStream = fse.createReadStream(gitpath);
+    const reader = readline.createInterface({
+      input: fileStream,
+      crlfDelay: Infinity,
+    });
+
+    try {
+      for await (const line of reader) {
+        const splits = line.split('gitdir:');
+        if (splits.length > 1) {
+          // remove last path segment, since it's a file
+          // we don't want it to impact our next path
+          const nextRelPath = path.join('..', splits[1].trim());
+          return getRootGitDir(path.resolve(gitpath, nextRelPath));
+        }
+      }
+      throw Error('Invalid git directory structure.');
+    } finally {
+      reader.close();
+    }
+  }
+
+  // Otherwise, throw - note: does not handle symlinks
+  throw Error('Invalid file type for git path.');
 }
 
 module.exports = GitUtils;
